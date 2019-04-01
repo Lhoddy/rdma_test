@@ -194,16 +194,15 @@ void send_mr(void * context)
       send_mr(conn);
       post_receives(conn);
     }
-    if(conn->recv_state == RS_MR_RECV){
+    if(conn->recv_msg->type == MSG_DONE){
       printf("send MSG_DONE\n");
       conn->send_msg->type = MSG_DONE;
-      send_message(conn);
+      //send_message(conn);
       post_receives_msg(conn);
+post_receives_msg(conn);
+printf("remote buffer: %s\n",conn->rdma_local_region);
+    //rdma_disconnect(conn->id);
     }
-  }
-  if(conn->recv_msg->type == MSG_DONE){
-    printf("remote buffer: %s\n",conn->rdma_local_region);
-    rdma_disconnect(conn->id);
   }
   if(wc->opcode & IBV_WC_RECV){
     conn->recv_state++;

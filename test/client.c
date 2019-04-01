@@ -8,18 +8,18 @@ static int on_route_resolved(struct rdma_cm_id *id);
 static int on_connection(void *context);
 static int on_disconnect(struct rdma_cm_id *id);
 static int on_event(struct rdma_cm_event *event);
+
 static void send_message(struct connection *conn);
-
-static void on_completion(struct ibv_wc *wc);
-
 static void post_receives_msg(struct connection *conn);
-static void die(const char *reason);
 
 static void build_context(struct ibv_context *verbs);
 static void build_qp_attr(struct ibv_qp_init_attr *qp_attr);
-static void * poll_cq(void *);
-static void register_memory(struct connection *conn);
+static void conn_register_memory(struct connection *conn);
 
+static void * poll_cq(void *);
+static void on_completion(struct ibv_wc *wc);
+
+static void die(const char *reason);
 static struct context *s_ctx = NULL;
 
 int main(int argc, char **argv)
@@ -57,7 +57,7 @@ int main(int argc, char **argv)
 
 int on_addr_resolved(struct rdma_cm_id *id)
 {
-	TIPS(on_addr_resolved);
+  TIPS(on_addr_resolved);
   struct connection *conn;
   struct ibv_qp_init_attr qp_attr;
 
@@ -75,7 +75,7 @@ int on_addr_resolved(struct rdma_cm_id *id)
 
   conn->connected = 1;
 
-  register_memory(conn);
+  conn_register_memory(conn);
   post_receives_msg(conn);
 
   TEST_NZ(rdma_resolve_route(id, TIMEOUT_IN_MS));   //发送一个route_resolve的event
@@ -85,7 +85,7 @@ int on_addr_resolved(struct rdma_cm_id *id)
 
 int on_route_resolved(struct rdma_cm_id *id)
 {
-	TIPS(on_route_resolved);
+  TIPS(on_route_resolved);
   struct rdma_conn_param cm_params;
 
   memset(&cm_params, 0, sizeof(cm_params));
@@ -103,7 +103,7 @@ int on_route_resolved(struct rdma_cm_id *id)
 
 int on_connection(void *context)  //在此之前发送的receive已经被消耗，数据接受完成;做client本次连接要做的事
 {
-	TIPS(on_connection);
+  TIPS(on_connection);
   struct connection *conn = (struct connection *)context;
 
   snprintf(conn->rdma_local_region, BUFFER_SIZE, "message from active/client side with pid %d", getpid());
@@ -135,7 +135,7 @@ int on_connection(void *context)  //在此之前发送的receive已经被消耗�
 
 int on_disconnect(struct rdma_cm_id *id)
 {
-	TIPS(on_disconnect);
+  TIPS(on_disconnect);
   struct connection *conn = (struct connection *)id->context;
 
   printf("disconnected.\n");
@@ -157,17 +157,17 @@ int on_disconnect(struct rdma_cm_id *id)
 
 int on_event(struct rdma_cm_event *event)
 {
-	TIPS(on_event);
+  TIPS(on_event);
   int r = 0;
 
   if (event->event == RDMA_CM_EVENT_ADDR_RESOLVED)   //由本地main的rdma_resolve_addr触发
-  	r = on_addr_resolved(event->id);
+    r = on_addr_resolved(event->id);
   else if (event->event == RDMA_CM_EVENT_ROUTE_RESOLVED)   //由本地on_addr_resolved的rdma_resolve_route触发
-  	r = on_route_resolved(event->id);
+    r = on_route_resolved(event->id);
   else if (event->event == RDMA_CM_EVENT_ESTABLISHED)     //由本地 rdma_connect触发
-  	r = on_connection(event->id->context);
+    r = on_connection(event->id->context);
   else if (event->event == RDMA_CM_EVENT_DISCONNECTED)    //由本地rdma_disconnect触发
-  	r = on_disconnect(event->id);
+    r = on_disconnect(event->id);
   else
     die("on_event: unknown event.");
 
@@ -195,69 +195,6 @@ void send_message(struct connection *conn)
 
   TEST_NZ(ibv_post_send(conn->qp,&wr,&bad_wr));
   
-}
-
-
- void on_completion(struct ibv_wc *wc)
-{
-  TIPS(on_completion);
-  struct connection *conn = (struct connection*)(uintptr_t)wc->wr_id;
-
-
-  if (wc->status != IBV_WC_SUCCESS) {
-      fprintf(stderr, "Send Completion reported failure: %s (%d)\n",
-              ibv_wc_status_str(wc->status), wc->status);
-      die("on_completion: status is not IBV_WC_SUCCESS.");
-  }
-  if(wc->opcode & IBV_WC_RECV)
-  {
-    conn->recv_state++;
-    if(conn->recv_msg->type == MSG_MR)
-    {
-      memcpy(&conn->peer_mr,&conn->recv_msg->data.mr,sizeof(conn->peer_mr));
-      struct ibv_send_wr wr,*bad_wr = NULL;
-      struct ibv_sge sge;
-      if(conn->mode == M_WRITE)
-        printf("received MSG_MR. writing message to remote memory...\n");
-      else
-        printf("received MSG_MR. reading message from remote memory...\n");
-      
-      memset(&wr,0,sizeof(wr));
-      
-      wr.wr_id= (uintptr_t)conn;
-      wr.opcode = IBV_WR_RDMA_WRITE;  //(conn->mode == M_WRITE) ? IBV_WR_RDMA_WRITE: IBV_WR_RDMA_READ;
-      wr.sg_list = &sge;
-      wr.num_sge = 1;
-      wr.send_flags = IBV_SEND_SIGNALED;
-      wr.wr.rdma.remote_addr = (uintptr_t)conn->peer_mr.addr;
-      wr.wr.rdma.rkey = conn->peer_mr.rkey;
-
-      sge.addr = (uintptr_t)conn->rdma_local_region;
-      sge.length = BUFFER_SIZE;
-      sge.lkey = conn->rdma_local_mr->lkey;
-
-      TEST_NZ(ibv_post_send(conn->qp,&wr,&bad_wr));
-
-      conn->send_msg->type = MSG_DONE;
-      send_message(conn);
-      post_receives_msg(conn);
-    }
-    printf("recv completed successfully.\n");
-  }
-  else{
-    conn->send_state++;
-    printf("send completed successfully.\n");
-  }
-  if(conn->recv_msg->type == MSG_DONE){
-      printf("finish!\n");
-      rdma_disconnect(conn->id);
-  }
-}
-
-void die(const char *reason)
-{
-  fprintf(stderr, "%s\n", reason);
-  exit(EXIT_FAILURE);
 }
 
 void post_receives_msg(struct connection *conn)
@@ -317,28 +254,10 @@ void build_context(struct ibv_context *verbs)
   qp_attr->cap.max_recv_sge = 1;
 }
 
- void * poll_cq(void *ctx)
+
+ void conn_register_memory(struct connection *conn)
 {
-  TIPS(poll_cq);
-  struct ibv_cq *cq;
-  struct ibv_wc wc;
-
-  while (1) {
-    TEST_NZ(ibv_get_cq_event(s_ctx->comp_channel, &cq, &ctx));
-    ibv_ack_cq_events(cq, 1);
-    TEST_NZ(ibv_req_notify_cq(cq, 0));
-
-    while (ibv_poll_cq(cq, 1, &wc))
-      on_completion(&wc);
-  }
-
-  return NULL;
-}
-
-
- void register_memory(struct connection *conn)
-{
-  TIPS(register_memory);
+  TIPS(conn_register_memory);
   conn->rdma_local_region = malloc(BUFFER_SIZE);
   conn->rdma_remote_region = malloc(BUFFER_SIZE);
 
@@ -368,3 +287,84 @@ void build_context(struct ibv_context *verbs)
     conn->recv_msg, 
     sizeof(struct message), 
     IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));}
+
+
+ void * poll_cq(void *ctx)
+{
+  TIPS(poll_cq);
+  struct ibv_cq *cq;
+  struct ibv_wc wc;
+
+  while (1) {
+    TEST_NZ(ibv_get_cq_event(s_ctx->comp_channel, &cq, &ctx));
+    ibv_ack_cq_events(cq, 1);
+    TEST_NZ(ibv_req_notify_cq(cq, 0));
+
+    while (ibv_poll_cq(cq, 1, &wc))
+      on_completion(&wc);
+  }
+
+  return NULL;
+}
+
+
+ void on_completion(struct ibv_wc *wc)
+{
+  TIPS(on_completion);
+  struct connection *conn = (struct connection*)(uintptr_t)wc->wr_id;
+
+
+  if (wc->status != IBV_WC_SUCCESS) {
+      fprintf(stderr, "EERROR: %s (%d)\t",
+              ibv_wc_status_str(wc->status), wc->status);
+      die("on_completion: status is not IBV_WC_SUCCESS.");
+  }
+  if(wc->opcode & IBV_WC_RECV)
+  {
+    conn->recv_state++;
+    if(conn->recv_msg->type == MSG_MR)
+    {
+      memcpy(&conn->peer_mr,&conn->recv_msg->data.mr,sizeof(conn->peer_mr));
+      struct ibv_send_wr wr,*bad_wr = NULL;
+      struct ibv_sge sge;
+      if(conn->mode == M_WRITE)
+        printf("received MSG_MR. writing message to remote memory...\n");
+      else
+        printf("received MSG_MR. reading message from remote memory...\n");
+      
+      memset(&wr,0,sizeof(wr));
+      
+      wr.wr_id= (uintptr_t)conn;
+      wr.opcode = IBV_WR_RDMA_READ;  //(conn->mode == M_WRITE) ? IBV_WR_RDMA_WRITE: IBV_WR_RDMA_READ;
+      wr.sg_list = &sge;
+      wr.num_sge = 1;
+      wr.send_flags = IBV_SEND_SIGNALED;
+      wr.wr.rdma.remote_addr = (uintptr_t)conn->peer_mr.addr;
+      wr.wr.rdma.rkey = conn->peer_mr.rkey;
+
+      sge.addr = (uintptr_t)conn->rdma_local_region;
+      sge.length = BUFFER_SIZE;
+      sge.lkey = conn->rdma_local_mr->lkey;
+
+      TEST_NZ(ibv_post_send(conn->qp,&wr,&bad_wr));
+
+      conn->send_msg->type = MSG_DONE;
+      send_message(conn);
+      post_receives_msg(conn);
+    }
+if(conn->recv_msg->type == MSG_DONE){
+      printf("remote buffer: %s\n",conn->rdma_local_region);
+      rdma_disconnect(conn->id);
+  }
+  }
+  else{
+    conn->send_state++;
+  }
+  
+}
+
+void die(const char *reason)
+{
+  fprintf(stderr, "%s\n", reason);
+  exit(EXIT_FAILURE);
+}

@@ -22,12 +22,27 @@ struct context {
 
 struct message {
 	enum {
+		MSG_ERROR,
+		MSG_WR,
 		MSG_MR,
 		MSG_DONE
 	} type ;
 	union{ 
 		struct ibv_mr mr ;
 	} data ;
+};
+
+struct conn_type_message
+{
+	enum 
+	{
+		NONE,
+		TYPE_W,
+		TYPE_R,
+		TYPE_OTHER,
+	}type;
+	char address[80]; //remote filename
+	int size;  //totol size
 };
 
 struct connection
@@ -37,8 +52,11 @@ struct connection
 	
 	int connected ; 
 	
-	struct ibv_mr *recv_mr ; 
-	struct ibv_mr *send_mr ; 
+	struct ibv_mr *init_conn_type_msg_mr;
+	struct conn_type_message * init_conn_type_msg;
+
+	struct ibv_mr *recv_msg_mr ; 
+	struct ibv_mr *send_msg_mr ; 
 	struct ibv_mr *rdma_local_mr ; 
 	struct ibv_mr *rdma_remote_mr ; 
 	
