@@ -377,7 +377,7 @@ void build_context(struct ibv_context *verbs)
       wr.wr.rdma.remote_addr = (uintptr_t)conn->peer_mr.addr;
       wr.wr.rdma.rkey = conn->peer_mr.rkey;
 
-      sge.addr = (uintptr_t)conn->rdma_local_region;
+      sge.addr = (uintptr_t)(conn->rdma_local_region);
       sge.length = BUFFER_SIZE;
       sge.lkey = conn->rdma_local_mr->lkey;
 
