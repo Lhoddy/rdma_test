@@ -108,8 +108,10 @@ int on_connection(void *context)  //在此之前发送的receive已经被消耗�
 
   snprintf(conn->rdma_local_region, BUFFER_SIZE, "message from active/client side with pid %d", getpid());
 
-  conn->send_msg->type = MSG_WR;
-  memcpy(&conn->send_msg->data.mr,conn->rdma_remote_mr,sizeof(struct ibv_mr));     //将remote_mr发送到远端
+  conn->init_conn_type_msg->type = TYPE_W;
+  conn->init_conn_type_msg->size = BUFFER_SIZE;
+  char filename[80] = "test.txt";
+  memcpy(conn->init_conn_type_msg->address,filename,sizeof(char)*80);
 
   struct ibv_send_wr wr,*bad_wr = NULL;
   struct ibv_sge sge;
@@ -122,13 +124,32 @@ int on_connection(void *context)  //在此之前发送的receive已经被消耗�
   wr.num_sge = 1;
   wr.send_flags = IBV_SEND_SIGNALED;
 
-  sge.addr = (uintptr_t)conn->rdma_remote_region;
-  sge.length = BUFFER_SIZE;
-  sge.lkey = conn->rdma_remote_mr->lkey;
-
-  while(!conn->connected);
+  sge.addr = (uintptr_t)conn->init_conn_type_msg;
+  sge.length = sizeof(struct conn_type_message);
+  sge.lkey = conn->init_conn_type_msg_mr->lkey;
 
   TEST_NZ(ibv_post_send(conn->qp,&wr,&bad_wr));
+  // conn->send_msg->type = MSG_WR;
+  // memcpy(&conn->send_msg->data.mr,conn->rdma_remote_mr,sizeof(struct ibv_mr));     //将remote_mr发送到远端
+
+  // struct ibv_send_wr wr,*bad_wr = NULL;
+  // struct ibv_sge sge;
+
+  // memset(&wr,0,sizeof(wr));
+
+  // wr.wr_id = (uintptr_t)conn;
+  // wr.opcode = IBV_WR_SEND;
+  // wr.sg_list = &sge;
+  // wr.num_sge = 1;
+  // wr.send_flags = IBV_SEND_SIGNALED;
+
+  // sge.addr = (uintptr_t)conn->rdma_remote_region;
+  // sge.length = BUFFER_SIZE;
+  // sge.lkey = conn->rdma_remote_mr->lkey;
+
+  // while(!conn->connected);
+
+  // TEST_NZ(ibv_post_send(conn->qp,&wr,&bad_wr));
   
   return 0;
 }
@@ -264,6 +285,8 @@ void build_context(struct ibv_context *verbs)
   conn->send_msg = malloc(sizeof(struct message));
   conn->recv_msg = malloc(sizeof(struct message));
 
+  conn->init_conn_type_msg = malloc(sizeof(struct conn_type_message));
+
   TEST_Z(conn->rdma_local_mr = ibv_reg_mr(
     s_ctx->pd, 
     conn->rdma_local_region, 
@@ -286,7 +309,14 @@ void build_context(struct ibv_context *verbs)
     s_ctx->pd, 
     conn->recv_msg, 
     sizeof(struct message), 
-    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));}
+    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
+
+  TEST_Z(conn->init_conn_type_msg_mr = ibv_reg_mr(
+    s_ctx->pd, 
+    conn->init_conn_type_msg, 
+    sizeof(struct conn_type_message), 
+    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
+}
 
 
  void * poll_cq(void *ctx)
@@ -301,7 +331,12 @@ void build_context(struct ibv_context *verbs)
     TEST_NZ(ibv_req_notify_cq(cq, 0));
 
     while (ibv_poll_cq(cq, 1, &wc))
-      on_completion(&wc);
+      //if(s_ctx->type == unset)
+        on_completion(&wc);
+      //else if(s_ctx->type == write)
+        // on_completion_write(&wc);
+      //else if(s_ctx->type == read)
+        // on_completion_read(&wc);
   }
 
   return NULL;
@@ -335,7 +370,7 @@ void build_context(struct ibv_context *verbs)
       memset(&wr,0,sizeof(wr));
       
       wr.wr_id= (uintptr_t)conn;
-      wr.opcode = IBV_WR_RDMA_READ;  //(conn->mode == M_WRITE) ? IBV_WR_RDMA_WRITE: IBV_WR_RDMA_READ;
+      wr.opcode = (conn->mode == M_WRITE) ? IBV_WR_RDMA_WRITE: IBV_WR_RDMA_READ;
       wr.sg_list = &sge;
       wr.num_sge = 1;
       wr.send_flags = IBV_SEND_SIGNALED;
@@ -352,13 +387,26 @@ void build_context(struct ibv_context *verbs)
       send_message(conn);
       post_receives_msg(conn);
     }
-if(conn->recv_msg->type == MSG_DONE){
-      printf("remote buffer: %s\n",conn->rdma_local_region);
+    if(conn->recv_msg->type == MSG_DONE){
+      printf("finish!\n");
       rdma_disconnect(conn->id);
-  }
+    }
   }
   else{
-    conn->send_state++;
+    if(conn->init_conn_type_msg->type != NONE)
+    {
+      if(conn->init_conn_type_msg->type == TYPE_W)
+        conn->mode = M_WRITE;
+      else
+        conn->mode = M_READ;
+      TIPS(send_conn_type_msg);
+conn->init_conn_type_msg->type = NONE;
+    }
+    else if(conn->init_conn_type_msg->type == NONE)
+    {
+      printf("transfer %d\n",(int) wc->byte_len);
+      conn->send_state++;
+    }
   }
   
 }

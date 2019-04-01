@@ -4,21 +4,21 @@ static int on_connect_request(struct rdma_cm_id *id);
 static int on_connection(void *context);
 static int on_disconnect(struct rdma_cm_id *id);
 static int on_event(struct rdma_cm_event *event);
-static void send_message(struct connection *conn);
 
+static void send_message(struct connection *conn);
 static void send_mr(void * context);
 
-static void on_completion(struct ibv_wc *wc);
+static void conn_register_memory(struct connection *conn);
 
-static void post_receives(struct connection *conn);
 static void post_receives_msg(struct connection *conn);
-static void die(const char *reason);
+static void post_receives_conn_type(struct connection *conn);
 
 static void build_context(struct ibv_context *verbs);
 static void build_qp_attr(struct ibv_qp_init_attr *qp_attr);
 static void * poll_cq(void *);
-static void register_memory(struct connection *conn);
+static void on_completion(struct ibv_wc *wc);
 
+static void die(const char *reason);
 static struct context *s_ctx = NULL;
 
 int main(int argc, char **argv)
@@ -57,6 +57,8 @@ int main(int argc, char **argv)
   return 0;
 }
 
+
+
 int on_connect_request(struct rdma_cm_id *id)
 {
   TIPS(on_connect_request);
@@ -79,8 +81,9 @@ int on_connect_request(struct rdma_cm_id *id)
 
   conn->connected = 1;
 
-  register_memory(conn);
-  post_receives(conn);
+
+  conn_register_memory(conn);
+  post_receives_conn_type(conn);
 
   memset(&cm_params, 0, sizeof(cm_params));
 
@@ -142,6 +145,85 @@ int on_event(struct rdma_cm_event *event)
   return r;
 }
 
+void build_context(struct ibv_context *verbs)
+{
+  TIPS(build_context);
+  if (s_ctx) {
+    if (s_ctx->ctx != verbs)
+      die("cannot handle events in more than one context.");
+
+    return;
+  }
+
+  s_ctx = (struct context *)malloc(sizeof(struct context));
+
+  s_ctx->ctx = verbs;
+
+  TEST_Z(s_ctx->pd = ibv_alloc_pd(s_ctx->ctx));
+  TEST_Z(s_ctx->comp_channel = ibv_create_comp_channel(s_ctx->ctx));
+  TEST_Z(s_ctx->cq = ibv_create_cq(s_ctx->ctx, 10, NULL, s_ctx->comp_channel, 0)); /* cqe=10 is arbitrary */
+  TEST_NZ(ibv_req_notify_cq(s_ctx->cq, 0));
+
+  TEST_NZ(pthread_create(&s_ctx->cq_poller_thread, NULL, poll_cq, NULL));  //开启线程轮询cq
+}
+
+void build_qp_attr(struct ibv_qp_init_attr *qp_attr)
+{
+  TIPS(build_qp_attr);
+  memset(qp_attr, 0, sizeof(*qp_attr));
+
+  qp_attr->send_cq = s_ctx->cq;
+  qp_attr->recv_cq = s_ctx->cq;
+  qp_attr->qp_type = IBV_QPT_RC;
+
+  qp_attr->cap.max_send_wr = 10;
+  qp_attr->cap.max_recv_wr = 10;
+  qp_attr->cap.max_send_sge = 1;
+  qp_attr->cap.max_recv_sge = 1;
+}
+
+ void conn_register_memory(struct connection *conn)
+{
+  TIPS(conn_register_memory);
+  conn->rdma_local_region = malloc(BUFFER_SIZE);
+  conn->rdma_remote_region = malloc(BUFFER_SIZE);
+
+  conn->send_msg = malloc(sizeof(struct message));
+  conn->recv_msg = malloc(sizeof(struct message));
+
+  conn->init_conn_type_msg = malloc(sizeof(struct conn_type_message));
+
+  TEST_Z(conn->rdma_local_mr = ibv_reg_mr(
+    s_ctx->pd, 
+    conn->rdma_local_region, 
+    BUFFER_SIZE, 
+    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
+
+  TEST_Z(conn->rdma_remote_mr = ibv_reg_mr(
+    s_ctx->pd, 
+    conn->rdma_remote_region, 
+    BUFFER_SIZE, 
+    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
+
+  TEST_Z(conn->send_msg_mr = ibv_reg_mr(
+    s_ctx->pd, 
+    conn->send_msg, 
+    sizeof(struct message), 
+    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
+
+  TEST_Z(conn->recv_msg_mr = ibv_reg_mr(
+    s_ctx->pd, 
+    conn->recv_msg, 
+    sizeof(struct message), 
+    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
+
+  TEST_Z(conn->init_conn_type_msg_mr = ibv_reg_mr(
+    s_ctx->pd, 
+    conn->init_conn_type_msg, 
+    sizeof(struct conn_type_message), 
+    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
+}
+
 void send_message(struct connection *conn)
 {
   struct ibv_send_wr wr,*bad_wr = NULL;
@@ -176,69 +258,9 @@ void send_mr(void * context)
   conn->send_msg->type = MSG_DONE;
 }
 
- void on_completion(struct ibv_wc *wc)
-{
-  TIPS(on_completion);
-  struct connection *conn = (struct connection*)(uintptr_t)wc->wr_id;
-
-  if (wc->status != IBV_WC_SUCCESS) {
-      fprintf(stderr, "Send Completion reported failure: %s (%d)\n",
-              ibv_wc_status_str(wc->status), wc->status);
-      die("on_completion: status is not IBV_WC_SUCCESS.");
-  }
-  if(wc->opcode & IBV_WC_RECV)
-  {
-    if(conn->recv_state == RS_INIT)
-    {
-      printf("recv first  send mr+post recv\n");
-      send_mr(conn);
-      post_receives(conn);
-    }
-    if(conn->recv_msg->type == MSG_DONE){
-      printf("send MSG_DONE\n");
-      conn->send_msg->type = MSG_DONE;
-      //send_message(conn);
-      post_receives_msg(conn);
-post_receives_msg(conn);
-printf("remote buffer: %s\n",conn->rdma_local_region);
-    //rdma_disconnect(conn->id);
-    }
-  }
-  if(wc->opcode & IBV_WC_RECV){
-    conn->recv_state++;
-    printf("recv completed successfully.\n");
-  }
-  else{
-    conn->send_state++;
-    printf("send completed successfully.\n");
-  }
-}
-
-void die(const char *reason)
-{
-  fprintf(stderr, "%s\n", reason);
-  exit(EXIT_FAILURE);
-}
 
 
 
-void post_receives(struct connection *conn)
-{
-  TIPS(post_receives);
-  struct ibv_recv_wr wr, *bad_wr = NULL;
-  struct ibv_sge sge;
-
-  wr.wr_id = (uintptr_t)conn;
-  wr.next = NULL;
-  wr.sg_list = &sge;
-  wr.num_sge = 1;
-
-  sge.addr = (uintptr_t)conn->rdma_remote_region;
-  sge.length = BUFFER_SIZE;
-  sge.lkey = conn->rdma_remote_mr->lkey;
-
-  TEST_NZ(ibv_post_recv(conn->qp, &wr, &bad_wr));
-}
 
 void post_receives_msg(struct connection *conn)
 {
@@ -258,41 +280,24 @@ void post_receives_msg(struct connection *conn)
   TEST_NZ(ibv_post_recv(conn->qp, &wr, &bad_wr));
 }
 
-void build_context(struct ibv_context *verbs)
+
+
+void post_receives_conn_type(struct connection *conn)
 {
-  TIPS(build_context);
-  if (s_ctx) {
-    if (s_ctx->ctx != verbs)
-      die("cannot handle events in more than one context.");
+  TIPS(post_receives);
+  struct ibv_recv_wr wr, *bad_wr = NULL;
+  struct ibv_sge sge;
 
-    return;
-  }
+  wr.wr_id = (uintptr_t)conn;
+  wr.next = NULL;
+  wr.sg_list = &sge;
+  wr.num_sge = 1;
 
-  s_ctx = (struct context *)malloc(sizeof(struct context));
+  sge.addr = (uintptr_t)conn->init_conn_type_msg;
+  sge.length = sizeof(struct conn_type_message);
+  sge.lkey = conn->init_conn_type_msg_mr->lkey;
 
-  s_ctx->ctx = verbs;
-
-  TEST_Z(s_ctx->pd = ibv_alloc_pd(s_ctx->ctx));
-  TEST_Z(s_ctx->comp_channel = ibv_create_comp_channel(s_ctx->ctx));
-  TEST_Z(s_ctx->cq = ibv_create_cq(s_ctx->ctx, 10, NULL, s_ctx->comp_channel, 0)); /* cqe=10 is arbitrary */
-  TEST_NZ(ibv_req_notify_cq(s_ctx->cq, 0));
-
-  TEST_NZ(pthread_create(&s_ctx->cq_poller_thread, NULL, poll_cq, NULL));  //开启线程轮询cq
-}
-
- void build_qp_attr(struct ibv_qp_init_attr *qp_attr)
-{
-  TIPS(build_qp_attr);
-  memset(qp_attr, 0, sizeof(*qp_attr));
-
-  qp_attr->send_cq = s_ctx->cq;
-  qp_attr->recv_cq = s_ctx->cq;
-  qp_attr->qp_type = IBV_QPT_RC;
-
-  qp_attr->cap.max_send_wr = 10;
-  qp_attr->cap.max_recv_wr = 10;
-  qp_attr->cap.max_send_sge = 1;
-  qp_attr->cap.max_recv_sge = 1;
+  TEST_NZ(ibv_post_recv(conn->qp, &wr, &bad_wr));
 }
 
  void * poll_cq(void *ctx)
@@ -307,45 +312,68 @@ void build_context(struct ibv_context *verbs)
     TEST_NZ(ibv_req_notify_cq(cq, 0));
 
     while (ibv_poll_cq(cq, 1, &wc))
-      on_completion(&wc);
+      //if(s_ctx->type == unset)
+        on_completion(&wc);
+      //else if(s_ctx->type == write)
+        // on_completion_write(&wc);
+      //else if(s_ctx->type == read)
+        // on_completion_read(&wc);
   }
 
   return NULL;
 }
 
 
- void register_memory(struct connection *conn)
+ void on_completion(struct ibv_wc *wc)
 {
-  TIPS(register_memory);
-  conn->rdma_local_region = malloc(BUFFER_SIZE);
-  conn->rdma_remote_region = malloc(BUFFER_SIZE);
+  TIPS(on_completion);
+  struct connection *conn = (struct connection*)(uintptr_t)wc->wr_id;
 
-  conn->send_msg = malloc(sizeof(struct message));
-  conn->recv_msg = malloc(sizeof(struct message));
+  if (wc->status != IBV_WC_SUCCESS) {
+      fprintf(stderr, "EERROR: %s (%d)\t",
+              ibv_wc_status_str(wc->status), wc->status);
+      die("on_completion: status is not IBV_WC_SUCCESS.");
+  }
+  if(wc->opcode & IBV_WC_RECV)
+  {
+    if(conn->init_conn_type_msg->type != NONE)
+    {
+      conn->init_conn_type_msg->type = NONE;
+      TIPS(get_conn_type_msg);
+      // char des[80] = "./";
+      // strcat(des,conn->init_conn_type_msg->address);
+      // FILE * fd = fopen(des,"rb");
+      // printf("send size = %d\n",(int)fread(conn->rdma_local_region, sizeof(char),BUFFER_SIZE,fd));
+      // fclose(fd);
+      send_mr(conn);
+      post_receives_msg(conn);
+    }
+    else if(conn->init_conn_type_msg->type == NONE)
+    {
+      if(conn->recv_msg->type == MSG_DONE){
+        conn->send_msg->type = MSG_DONE;
+        send_message(conn);
+        printf("remote buffer: %s\n",conn->rdma_local_region);
+      }
+    }
+  }
+
+  if (wc->opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
+    printf("recv RDMA completed successfully.\n");
+  }
+  if(wc->opcode & IBV_WC_RECV){
+    conn->recv_state++;
+    printf("recv completed successfully.\n");
+  }
+  else{
+    conn->send_state++;
+    printf("send completed successfully.\n");
+  }
+}
 
 
-
-  TEST_Z(conn->rdma_local_mr = ibv_reg_mr(
-    s_ctx->pd, 
-    conn->rdma_local_region, 
-    BUFFER_SIZE, 
-    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
-
-  TEST_Z(conn->rdma_remote_mr = ibv_reg_mr(
-    s_ctx->pd, 
-    conn->rdma_remote_region, 
-    BUFFER_SIZE, 
-    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
-
-  TEST_Z(conn->send_msg_mr = ibv_reg_mr(
-    s_ctx->pd, 
-    conn->send_msg, 
-    sizeof(struct message), 
-    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
-
-  TEST_Z(conn->recv_msg_mr = ibv_reg_mr(
-    s_ctx->pd, 
-    conn->recv_msg, 
-    sizeof(struct message), 
-    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
+void die(const char *reason)
+{
+  fprintf(stderr, "%s\n", reason);
+  exit(EXIT_FAILURE);
 }
