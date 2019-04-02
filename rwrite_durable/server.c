@@ -21,6 +21,7 @@ static void on_completion(struct ibv_wc *wc);
 static void die(const char *reason);
 static struct context *s_ctx = NULL;
 
+
 int main(int argc, char **argv)
 {
   struct sockaddr_in addr;
@@ -50,7 +51,6 @@ int main(int argc, char **argv)
     if (on_event(&event_copy))
       break;
   }
-
   rdma_destroy_id(listener);
   rdma_destroy_event_channel(ec);
 
@@ -253,7 +253,7 @@ void send_mr(void * context)
 
   conn->send_msg->type = MSG_MR;
   memcpy(&conn->send_msg->data.mr,conn->rdma_local_mr,sizeof(struct ibv_mr));     //将remote_mr发送到远端
-
+  memcpy(&conn->send_msg->data.mr,conn->rdma_remote_mr,sizeof(struct ibv_mr));     //将remote_mr发送到远端
   send_message(conn);
   conn->send_msg->type = MSG_DONE;
 }
@@ -356,7 +356,7 @@ void post_receives_conn_type(struct connection *conn)
     {
       if(conn->recv_msg->type == MSG_DONE){
         conn->send_msg->type = MSG_DONE;
-        send_message(conn);
+        // send_message(conn);
         if(conn->mode == M_WRITE)
           printf("remote buffer: %s\n",conn->rdma_local_region);
         else

@@ -1,4 +1,5 @@
 #include "rdma_common.h"
+struct timeval start,finish;
 
 
 const int TIMEOUT_IN_MS = 500; /* ms */
@@ -22,8 +23,15 @@ static void on_completion(struct ibv_wc *wc);
 static void die(const char *reason);
 static struct context *s_ctx = NULL;
 
+void time_count(struct timeval start,struct timeval finish)
+{
+  printf("cost the time is : %ld us.\n",
+    1000000 * (finish.tv_sec - start.tv_sec) + finish.tv_usec - start.tv_usec);
+}
+
 int main(int argc, char **argv)
 {
+  
   struct addrinfo *addr;
   struct rdma_cm_event *event = NULL;
   struct rdma_cm_id *conn= NULL;
@@ -39,7 +47,8 @@ int main(int argc, char **argv)
   TEST_NZ(rdma_resolve_addr(conn, NULL, addr->ai_addr, TIMEOUT_IN_MS)); //向新产生的ec中加入addr_resolve event
 
   freeaddrinfo(addr);
-
+  
+  
   while (rdma_get_cm_event(ec, &event) == 0) {
     struct rdma_cm_event event_copy;
 
@@ -49,7 +58,7 @@ int main(int argc, char **argv)
     if (on_event(&event_copy))
       break;
   }
-
+  
   rdma_destroy_event_channel(ec);
 
   return 0;
@@ -360,7 +369,9 @@ void build_context(struct ibv_context *verbs)
     conn->recv_state++;
     if(conn->recv_msg->type == MSG_MR)
     {
+    	gettimeofday(&start, 0);//计时开始
       memcpy(&conn->peer_mr,&conn->recv_msg->data.mr,sizeof(conn->peer_mr));
+      memcpy(&conn->peer_mr2,&conn->recv_msg->data.mr2,sizeof(conn->peer_mr));
       struct ibv_send_wr wr,*bad_wr = NULL;
       struct ibv_sge sge;
       if(conn->mode == M_WRITE)
@@ -393,7 +404,9 @@ void build_context(struct ibv_context *verbs)
       rdma_disconnect(conn->id);
     }
   }     
-  else{TIPS(on_completion_SEND);
+  else
+  {
+    TIPS(on_completion_SEND);
     if(conn->init_conn_type_msg->type != NONE)
     {
       //for w/r init_conn_type
@@ -410,9 +423,11 @@ void build_context(struct ibv_context *verbs)
     {
       printf("transfer %d\n",(int) wc->byte_len);
       conn->send_state++;
-      if(conn->mode == M_WRITE)
+      if(1)//conn->mode == M_WRITE)
       {
-        if( conn->send_state == SS_WRITE_SENT){
+        if( conn->send_state == SS_WRITE_SENT)
+        {
+          
           struct ibv_send_wr wr,*bad_wr = NULL;
           struct ibv_sge sge;
           memset(&wr,0,sizeof(wr));
@@ -421,32 +436,39 @@ void build_context(struct ibv_context *verbs)
           wr.sg_list = &sge;
           wr.num_sge = 1;
           wr.send_flags = IBV_SEND_SIGNALED;
-          wr.wr.rdma.remote_addr = (uintptr_t)(conn->peer_mr.addr + BUFFER_SIZE-1);
+          wr.wr.rdma.remote_addr = (uintptr_t)(conn->peer_mr.addr + 1);
           wr.wr.rdma.rkey = conn->peer_mr.rkey;
 
-          sge.addr = (uintptr_t)(conn->rdma_local_region + BUFFER_SIZE+1);
-          sge.length = 1;
-          sge.lkey = conn->rdma_local_mr->lkey;
-
+          sge.addr = (uintptr_t)conn->rdma_remote_region;
+          sge.length = 3;
+          sge.lkey = conn->rdma_remote_mr->lkey;
+	gettimeofday(&finish, 0);//计时结束
+          sleep(5);
+          time_count(start,finish);
+          gettimeofday(&start, 0);//计时开始
           TEST_NZ(ibv_post_send(conn->qp,&wr,&bad_wr));
+          
         }
         else if(conn->send_state == SS_RDMA_SENT)
         {
-          if(conn->mode == M_WRITE)  //read-after-write
+          if(1)//conn->mode == M_WRITE)  //read-after-write
           { 
-            if(* (conn->rdma_local_region + BUFFER_SIZE + 1) != * (conn->rdma_local_region + BUFFER_SIZE - 1))
-              TIPS(read_error!);
-            else TIPS(durable!!!!!!!!!!!!!!!!);
+            gettimeofday(&finish, 0);//计时结束
+            time_count(start,finish);
+            // if(* (conn->rdma_local_region + BUFFER_SIZE + 1) != * (conn->rdma_local_region + BUFFER_SIZE - 1))
+            //   TIPS(read_error!);
+            // else {TIPS(durable!!!!!!!!!!!!!!!!);}
+            printf("read= %s\n",(conn->rdma_remote_region));
             conn->send_msg->type = MSG_DONE;
+            
             send_message(conn);
             post_receives_msg(conn);
+            
           }
         }
       }
-
     }
   }
-  
 }
 
 void die(const char *reason)

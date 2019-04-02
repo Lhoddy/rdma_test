@@ -4,6 +4,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <rdma/rdma_cma.h>
+#include <time.h>
+#include <sys/time.h>
 
 #define TEST_NZ(x) do { if ( (x)) die("error: " #x " failed (returned non-zero)." ); } while (0)
 #define TEST_Z(x)  do { if (!(x)) die("error: " #x " failed (returned zero/null)."); } while (0)
@@ -29,6 +31,7 @@ struct message {
 	} type ;
 	union{ 
 		struct ibv_mr mr ;
+		struct ibv_mr mr2;
 	} data ;
 };
 
@@ -61,7 +64,8 @@ struct connection
 	struct ibv_mr *rdma_remote_mr ; 
 	
 	struct ibv_mr peer_mr ;
-	
+	struct ibv_mr peer_mr2 ;
+
 	struct message * recv_msg ;
 	struct message * send_msg;
 
@@ -106,3 +110,4 @@ struct connection
 // extern void build_qp_attr(struct ibv_qp_init_attr *qp_attr);
 // extern void * poll_cq(void *);
 // extern void register_memory(struct connection *conn);
+

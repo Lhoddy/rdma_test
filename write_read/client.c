@@ -1,4 +1,5 @@
 #include "rdma_common.h"
+struct timeval start,finish;
 
 
 const int TIMEOUT_IN_MS = 500; /* ms */
@@ -22,8 +23,15 @@ static void on_completion(struct ibv_wc *wc);
 static void die(const char *reason);
 static struct context *s_ctx = NULL;
 
+void time_count(struct timeval start,struct timeval finish)
+{
+  printf("cost the time is : %ld us.\n",
+    1000000 * (finish.tv_sec - start.tv_sec) + finish.tv_usec - start.tv_usec);
+}
+
 int main(int argc, char **argv)
 {
+  
   struct addrinfo *addr;
   struct rdma_cm_event *event = NULL;
   struct rdma_cm_id *conn= NULL;
@@ -39,7 +47,8 @@ int main(int argc, char **argv)
   TEST_NZ(rdma_resolve_addr(conn, NULL, addr->ai_addr, TIMEOUT_IN_MS)); //向新产生的ec中加入addr_resolve event
 
   freeaddrinfo(addr);
-
+  
+  
   while (rdma_get_cm_event(ec, &event) == 0) {
     struct rdma_cm_event event_copy;
 
@@ -49,7 +58,7 @@ int main(int argc, char **argv)
     if (on_event(&event_copy))
       break;
   }
-
+  
   rdma_destroy_event_channel(ec);
 
   return 0;
@@ -72,7 +81,7 @@ int on_addr_resolved(struct rdma_cm_id *id)
   conn->qp = id->qp;
   conn->send_state = SS_INIT;
   conn->recv_state = RS_INIT;
-
+  conn->mode = M_NONE;
   conn->connected = 1;
 
   conn_register_memory(conn);
@@ -108,7 +117,7 @@ int on_connection(void *context)  //在此之前发送的receive已经被消耗�
 
   snprintf(conn->rdma_local_region, BUFFER_SIZE, "message from active/client side with pid %d", getpid());
 
-  conn->init_conn_type_msg->type = TYPE_R;
+  conn->init_conn_type_msg->type = TYPE_W;
   conn->init_conn_type_msg->size = BUFFER_SIZE;
   char filename[80] = "test.txt";
   memcpy(conn->init_conn_type_msg->address,filename,sizeof(char)*80);
@@ -279,8 +288,8 @@ void build_context(struct ibv_context *verbs)
  void conn_register_memory(struct connection *conn)
 {
   TIPS(conn_register_memory);
-  conn->rdma_local_region = malloc(BUFFER_SIZE);
-  conn->rdma_remote_region = malloc(BUFFER_SIZE);
+  conn->rdma_local_region = malloc(BUFFER_SIZE+2);
+  conn->rdma_remote_region = malloc(BUFFER_SIZE+2);
 
   conn->send_msg = malloc(sizeof(struct message));
   conn->recv_msg = malloc(sizeof(struct message));
@@ -290,13 +299,13 @@ void build_context(struct ibv_context *verbs)
   TEST_Z(conn->rdma_local_mr = ibv_reg_mr(
     s_ctx->pd, 
     conn->rdma_local_region, 
-    BUFFER_SIZE, 
+    BUFFER_SIZE+2, 
     IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
 
   TEST_Z(conn->rdma_remote_mr = ibv_reg_mr(
     s_ctx->pd, 
     conn->rdma_remote_region, 
-    BUFFER_SIZE, 
+    BUFFER_SIZE+2, 
     IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE));
 
   TEST_Z(conn->send_msg_mr = ibv_reg_mr(
@@ -345,7 +354,7 @@ void build_context(struct ibv_context *verbs)
 
  void on_completion(struct ibv_wc *wc)
 {
-  TIPS(on_completion);
+  
   struct connection *conn = (struct connection*)(uintptr_t)wc->wr_id;
 
 
@@ -356,9 +365,11 @@ void build_context(struct ibv_context *verbs)
   }
   if(wc->opcode & IBV_WC_RECV)
   {
+    TIPS(on_completion_RECV);
     conn->recv_state++;
     if(conn->recv_msg->type == MSG_MR)
     {
+    	gettimeofday(&start, 0);//计时开始
       memcpy(&conn->peer_mr,&conn->recv_msg->data.mr,sizeof(conn->peer_mr));
       struct ibv_send_wr wr,*bad_wr = NULL;
       struct ibv_sge sge;
@@ -370,36 +381,50 @@ void build_context(struct ibv_context *verbs)
       memset(&wr,0,sizeof(wr));
       
       wr.wr_id= (uintptr_t)conn;
-      wr.opcode = IBV_WR_RDMA_READ;  //(conn->mode == M_WRITE) ? IBV_WR_RDMA_WRITE: IBV_WR_RDMA_READ;
+      wr.opcode = (conn->mode == M_WRITE) ? IBV_WR_RDMA_WRITE: IBV_WR_RDMA_READ;
       wr.sg_list = &sge;
       wr.num_sge = 1;
       wr.send_flags = IBV_SEND_SIGNALED;
       wr.wr.rdma.remote_addr = (uintptr_t)conn->peer_mr.addr;
       wr.wr.rdma.rkey = conn->peer_mr.rkey;
 
-      sge.addr = (uintptr_t)(conn->rdma_local_region);
+      sge.addr = (uintptr_t)conn->rdma_local_region;
       sge.length = BUFFER_SIZE;
       sge.lkey = conn->rdma_local_mr->lkey;
 
       TEST_NZ(ibv_post_send(conn->qp,&wr,&bad_wr));
-
       conn->send_msg->type = MSG_DONE;
       send_message(conn);
       post_receives_msg(conn);
     }
-    if(conn->recv_msg->type == MSG_DONE){
-      printf("remote buffer: %s\n",conn->rdma_local_region);
+    else if(conn->recv_msg->type == MSG_DONE){
+      if(conn->mode == M_WRITE)
+        printf("finish!\n");
+      else
+        printf("remote buffer: %s\n",conn->rdma_local_region);
       rdma_disconnect(conn->id);
     }
-  }
-  else{
+  }     
+  else{TIPS(on_completion_SEND);
     if(conn->init_conn_type_msg->type != NONE)
     {
-      conn->init_conn_type_msg->type = NONE;
+      //for w/r init_conn_type
+      if(conn->init_conn_type_msg->type == TYPE_W)
+      {
+        conn->mode = M_WRITE;
+      }
+      else
+        conn->mode = M_READ;
       TIPS(send_conn_type_msg);
+      conn->init_conn_type_msg->type = NONE;
     }
     else if(conn->init_conn_type_msg->type == NONE)
     {
+      if(conn->send_state == SS_INIT){
+        gettimeofday(&finish, 0);//计时结束
+        time_count(start,finish);
+      }
+      printf("transfer %d\n",(int) wc->byte_len);
       conn->send_state++;
     }
   }
